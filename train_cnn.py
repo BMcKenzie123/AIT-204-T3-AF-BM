@@ -17,7 +17,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 # -- Config --
-n_epochs = 10
+n_epochs = 15
 batch_size = 64
 n_train = 5000
 n_test = max(n_train // 5, 200)  # 20% of training size, at least 200
@@ -34,54 +34,126 @@ np.random.seed(42)  # Fixed seed for reproducible dataset
 def generate_class_images(n, class_id, img_size=32):
     """Generate n synthetic images for a given class.
 
-    Each class draws a distinct geometric pattern onto a dim random
-    RGB background. Gaussian noise added at the end to prevent the
-    CNN from memorizing exact pixel values.
+    Each class draws a distinct geometric pattern onto a random RGB
+    background with heavy augmentation: random position jitter, size
+    variation, reduced contrast, and strong Gaussian noise.  All
+    patterns draw in grayscale (all channels equally) so the model
+    cannot shortcut on color.
     """
-    # Dim random base - 0.0 to 0.3 intensity per channel
-    imgs = np.random.rand(n, img_size, img_size, 3).astype('float32') * 0.3
+    # Higher background intensity (0.0-0.4) makes patterns harder to separate
+    imgs = np.random.rand(n, img_size, img_size, 3).astype('float32') * 0.4
     for i in range(n):
-        # Each class draws a unique pattern in a specific color channel
-        if class_id == 0:     # Horizontal lines in red
-            imgs[i, 10:12, 5:27, 0] = 0.9
-            imgs[i, 20:22, 5:27, 0] = 0.9
-        elif class_id == 1:   # Vertical lines in green
-            imgs[i, 5:27, 10:12, 1] = 0.9
-            imgs[i, 5:27, 20:22, 1] = 0.9
-        elif class_id == 2:   # Diagonal line in blue
-            for k in range(20):
-                imgs[i, 6+k, 6+k, 2] = 0.9
-        elif class_id == 3:   # Circle in all channels
-            for angle in np.linspace(0, 2*np.pi, 30):
-                r, c = int(16 + 8*np.sin(angle)), int(16 + 8*np.cos(angle))
+        # Per-image random offsets so patterns shift around
+        dr = np.random.randint(-4, 5)   # Row jitter  +/-4 pixels
+        dc = np.random.randint(-4, 5)   # Col jitter  +/-4 pixels
+        # Random intensity so contrast varies across samples
+        intensity = np.random.uniform(0.50, 0.75)
+
+        def safe(r1, r2, c1, c2):
+            """Clamp slice bounds to valid image coordinates."""
+            return max(0, r1), min(img_size, r2), max(0, c1), min(img_size, c2)
+
+        if class_id == 0:     # Horizontal lines (2-3 lines, random thickness)
+            n_lines = np.random.randint(2, 4)
+            thick = np.random.randint(1, 3)
+            for ln in range(n_lines):
+                row = 8 + ln * 8 + dr
+                r1, r2, c1, c2 = safe(row, row+thick, 4+dc, 28+dc)
+                imgs[i, r1:r2, c1:c2, :] = intensity
+
+        elif class_id == 1:   # Vertical lines (2-3 lines, random thickness)
+            n_lines = np.random.randint(2, 4)
+            thick = np.random.randint(1, 3)
+            for ln in range(n_lines):
+                col = 8 + ln * 8 + dc
+                r1, r2, c1, c2 = safe(4+dr, 28+dr, col, col+thick)
+                imgs[i, r1:r2, c1:c2, :] = intensity
+
+        elif class_id == 2:   # Diagonal line (random thickness 1-2)
+            thick = np.random.randint(1, 3)
+            for k in range(22):
+                for t in range(thick):
+                    r, c = 5 + k + dr + t, 5 + k + dc
+                    if 0 <= r < 32 and 0 <= c < 32:
+                        imgs[i, r, c, :] = intensity
+
+        elif class_id == 3:   # Circle (random radius 6-10)
+            radius = np.random.randint(6, 11)
+            cx, cy = 16 + dr, 16 + dc
+            for angle in np.linspace(0, 2*np.pi, 40):
+                r = int(cx + radius * np.sin(angle))
+                c = int(cy + radius * np.cos(angle))
                 if 0 <= r < 32 and 0 <= c < 32:
-                    imgs[i, r, c, :] = 0.9
-        elif class_id == 4:   # Solid block in red+green
-            imgs[i, 10:22, 10:22, 0] = 0.8
-            imgs[i, 10:22, 10:22, 1] = 0.8
-        elif class_id == 5:   # Corner dots in green
-            imgs[i, 2:8, 2:8, 1] = 0.9
-            imgs[i, 24:30, 24:30, 1] = 0.9
-        elif class_id == 6:   # Cross in blue
-            imgs[i, 14:18, 5:27, 2] = 0.9
-            imgs[i, 5:27, 14:18, 2] = 0.9
-        elif class_id == 7:   # Triangle in red
-            for row in range(15):
-                start = 16 - row
-                end = 16 + row
-                imgs[i, 5+row, max(0, start):min(32, end), 0] = 0.8
-        elif class_id == 8:   # Border frame in all channels
-            imgs[i, 3:5, 3:29, :] = 0.9
-            imgs[i, 27:29, 3:29, :] = 0.9
-            imgs[i, 3:29, 3:5, :] = 0.9
-            imgs[i, 3:29, 27:29, :] = 0.9
-        elif class_id == 9:   # Checkerboard in all channels
-            for r in range(0, 32, 8):
-                for c in range(0, 32, 8):
-                    if (r // 8 + c // 8) % 2 == 0:
-                        imgs[i, r:r+4, c:c+4, :] = 0.8
-        # Small Gaussian noise to simulate sensor noise
-        imgs[i] += np.random.randn(img_size, img_size, 3).astype('float32') * 0.05
+                    imgs[i, r, c, :] = intensity
+                    # Thicken the circle slightly
+                    if 0 <= r+1 < 32:
+                        imgs[i, r+1, c, :] = intensity
+
+        elif class_id == 4:   # Solid block (random size 8-14)
+            sz = np.random.randint(8, 15)
+            top = 16 - sz // 2 + dr
+            left = 16 - sz // 2 + dc
+            r1, r2, c1, c2 = safe(top, top+sz, left, left+sz)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+
+        elif class_id == 5:   # Corner dots (random dot size 4-7)
+            sz = np.random.randint(4, 8)
+            # Top-left corner
+            r1, r2, c1, c2 = safe(2+dr, 2+sz+dr, 2+dc, 2+sz+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+            # Bottom-right corner
+            r1, r2, c1, c2 = safe(30-sz+dr, 30+dr, 30-sz+dc, 30+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+
+        elif class_id == 6:   # Cross (random arm width 2-4)
+            w = np.random.randint(2, 5)
+            # Horizontal arm
+            r1, r2, c1, c2 = safe(16-w//2+dr, 16+w//2+dr, 4+dc, 28+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+            # Vertical arm
+            r1, r2, c1, c2 = safe(4+dr, 28+dr, 16-w//2+dc, 16+w//2+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+
+        elif class_id == 7:   # Triangle (random height 10-16)
+            h = np.random.randint(10, 17)
+            for row in range(h):
+                spread = int(row * 0.8)
+                start = 16 - spread + dc
+                end = 16 + spread + dc
+                r = 4 + row + dr
+                if 0 <= r < 32:
+                    c1, c2 = max(0, start), min(32, end)
+                    imgs[i, r, c1:c2, :] = intensity
+
+        elif class_id == 8:   # Border frame (random thickness 1-3)
+            thick = np.random.randint(1, 4)
+            m = 3  # margin
+            # Top edge
+            r1, r2, c1, c2 = safe(m+dr, m+thick+dr, m+dc, 29+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+            # Bottom edge
+            r1, r2, c1, c2 = safe(29-thick+dr, 29+dr, m+dc, 29+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+            # Left edge
+            r1, r2, c1, c2 = safe(m+dr, 29+dr, m+dc, m+thick+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+            # Right edge
+            r1, r2, c1, c2 = safe(m+dr, 29+dr, 29-thick+dc, 29+dc)
+            imgs[i, r1:r2, c1:c2, :] = intensity
+
+        elif class_id == 9:   # Checkerboard (random cell size 4-6)
+            cell = np.random.randint(4, 7)
+            for r in range(0, 32, cell):
+                for c in range(0, 32, cell):
+                    if ((r // cell) + (c // cell)) % 2 == 0:
+                        cr = r + dr
+                        cc = c + dc
+                        half = cell // 2
+                        r1, r2, c1, c2 = safe(cr, cr+half, cc, cc+half)
+                        imgs[i, r1:r2, c1:c2, :] = intensity
+
+        # Heavy Gaussian noise to obscure patterns (3x the original)
+        imgs[i] += np.random.randn(img_size, img_size, 3).astype('float32') * 0.15
     return np.clip(imgs, 0, 1)  # Clamp to valid pixel range
 
 print("Generating dataset...")
