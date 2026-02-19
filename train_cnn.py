@@ -34,126 +34,122 @@ np.random.seed(42)  # Fixed seed for reproducible dataset
 def generate_class_images(n, class_id, img_size=32):
     """Generate n synthetic images for a given class.
 
-    Each class draws a distinct geometric pattern onto a random RGB
-    background with heavy augmentation: random position jitter, size
-    variation, reduced contrast, and strong Gaussian noise.  All
-    patterns draw in grayscale (all channels equally) so the model
-    cannot shortcut on color.
+    Heavy augmentation makes classification genuinely difficult:
+    - High background noise (0.0-0.5) with strong Gaussian overlay
+    - Pattern intensity barely above background (0.45-0.65)
+    - Large position jitter (+/-6 pixels)
+    - Random pixel dropout masks 30-50% of pattern pixels
+    - All grayscale (no color shortcuts)
+    - Variable sizes and thicknesses
     """
-    # Higher background intensity (0.0-0.4) makes patterns harder to separate
-    imgs = np.random.rand(n, img_size, img_size, 3).astype('float32') * 0.4
+    # Bright noisy background - pattern must compete with this
+    imgs = np.random.rand(n, img_size, img_size, 3).astype('float32') * 0.5
     for i in range(n):
-        # Per-image random offsets so patterns shift around
-        dr = np.random.randint(-4, 5)   # Row jitter  +/-4 pixels
-        dc = np.random.randint(-4, 5)   # Col jitter  +/-4 pixels
-        # Random intensity so contrast varies across samples
-        intensity = np.random.uniform(0.50, 0.75)
+        # Large positional jitter
+        dr = np.random.randint(-6, 7)
+        dc = np.random.randint(-6, 7)
+        # Low intensity barely above background mean of ~0.25
+        intensity = np.random.uniform(0.45, 0.65)
+        # Pixel dropout rate - randomly erase 30-50% of pattern pixels
+        drop_rate = np.random.uniform(0.30, 0.50)
 
         def safe(r1, r2, c1, c2):
             """Clamp slice bounds to valid image coordinates."""
             return max(0, r1), min(img_size, r2), max(0, c1), min(img_size, c2)
 
-        if class_id == 0:     # Horizontal lines (2-3 lines, random thickness)
-            n_lines = np.random.randint(2, 4)
-            thick = np.random.randint(1, 3)
-            for ln in range(n_lines):
-                row = 8 + ln * 8 + dr
-                r1, r2, c1, c2 = safe(row, row+thick, 4+dc, 28+dc)
-                imgs[i, r1:r2, c1:c2, :] = intensity
+        def draw_with_dropout(img, r1, r2, c1, c2, val):
+            """Draw a filled rectangle but randomly drop pixels."""
+            r1, r2, c1, c2 = safe(r1, r2, c1, c2)
+            mask = np.random.rand(r2-r1, c2-c1) > drop_rate
+            for ch in range(3):
+                region = img[r1:r2, c1:c2, ch]
+                region[mask] = val
 
-        elif class_id == 1:   # Vertical lines (2-3 lines, random thickness)
-            n_lines = np.random.randint(2, 4)
-            thick = np.random.randint(1, 3)
+        if class_id == 0:     # Horizontal lines (2-4 thin lines)
+            n_lines = np.random.randint(2, 5)
             for ln in range(n_lines):
-                col = 8 + ln * 8 + dc
-                r1, r2, c1, c2 = safe(4+dr, 28+dr, col, col+thick)
-                imgs[i, r1:r2, c1:c2, :] = intensity
+                row = 5 + ln * 6 + dr + np.random.randint(-2, 3)
+                draw_with_dropout(imgs[i], row, row+1, 3+dc, 29+dc, intensity)
 
-        elif class_id == 2:   # Diagonal line (random thickness 1-2)
-            thick = np.random.randint(1, 3)
-            for k in range(22):
-                for t in range(thick):
-                    r, c = 5 + k + dr + t, 5 + k + dc
-                    if 0 <= r < 32 and 0 <= c < 32:
+        elif class_id == 1:   # Vertical lines (2-4 thin lines)
+            n_lines = np.random.randint(2, 5)
+            for ln in range(n_lines):
+                col = 5 + ln * 6 + dc + np.random.randint(-2, 3)
+                draw_with_dropout(imgs[i], 3+dr, 29+dr, col, col+1, intensity)
+
+        elif class_id == 2:   # Diagonal line (thin, 1px)
+            for k in range(24):
+                r, c = 4 + k + dr, 4 + k + dc
+                if 0 <= r < 32 and 0 <= c < 32:
+                    if np.random.rand() > drop_rate:
                         imgs[i, r, c, :] = intensity
 
-        elif class_id == 3:   # Circle (random radius 6-10)
-            radius = np.random.randint(6, 11)
+        elif class_id == 3:   # Circle (thin outline, random radius)
+            radius = np.random.randint(5, 12)
             cx, cy = 16 + dr, 16 + dc
-            for angle in np.linspace(0, 2*np.pi, 40):
+            for angle in np.linspace(0, 2*np.pi, 36):
                 r = int(cx + radius * np.sin(angle))
                 c = int(cy + radius * np.cos(angle))
                 if 0 <= r < 32 and 0 <= c < 32:
-                    imgs[i, r, c, :] = intensity
-                    # Thicken the circle slightly
-                    if 0 <= r+1 < 32:
-                        imgs[i, r+1, c, :] = intensity
+                    if np.random.rand() > drop_rate:
+                        imgs[i, r, c, :] = intensity
 
-        elif class_id == 4:   # Solid block (random size 8-14)
-            sz = np.random.randint(8, 15)
+        elif class_id == 4:   # Solid block (small, random size 6-12)
+            sz = np.random.randint(6, 13)
             top = 16 - sz // 2 + dr
             left = 16 - sz // 2 + dc
-            r1, r2, c1, c2 = safe(top, top+sz, left, left+sz)
-            imgs[i, r1:r2, c1:c2, :] = intensity
+            draw_with_dropout(imgs[i], top, top+sz, left, left+sz, intensity)
 
-        elif class_id == 5:   # Corner dots (random dot size 4-7)
-            sz = np.random.randint(4, 8)
-            # Top-left corner
-            r1, r2, c1, c2 = safe(2+dr, 2+sz+dr, 2+dc, 2+sz+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
-            # Bottom-right corner
-            r1, r2, c1, c2 = safe(30-sz+dr, 30+dr, 30-sz+dc, 30+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
+        elif class_id == 5:   # Corner dots (small, random size 3-6)
+            sz = np.random.randint(3, 7)
+            draw_with_dropout(imgs[i], 2+dr, 2+sz+dr, 2+dc, 2+sz+dc, intensity)
+            draw_with_dropout(imgs[i], 30-sz+dr, 30+dr, 30-sz+dc, 30+dc, intensity)
 
-        elif class_id == 6:   # Cross (random arm width 2-4)
-            w = np.random.randint(2, 5)
-            # Horizontal arm
-            r1, r2, c1, c2 = safe(16-w//2+dr, 16+w//2+dr, 4+dc, 28+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
-            # Vertical arm
-            r1, r2, c1, c2 = safe(4+dr, 28+dr, 16-w//2+dc, 16+w//2+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
+        elif class_id == 6:   # Cross (thin arms, width 1-2)
+            w = np.random.randint(1, 3)
+            draw_with_dropout(imgs[i], 16-w//2+dr, 16+w//2+1+dr, 3+dc, 29+dc, intensity)
+            draw_with_dropout(imgs[i], 3+dr, 29+dr, 16-w//2+dc, 16+w//2+1+dc, intensity)
 
-        elif class_id == 7:   # Triangle (random height 10-16)
-            h = np.random.randint(10, 17)
+        elif class_id == 7:   # Triangle (thin outline only, not filled)
+            h = np.random.randint(8, 16)
             for row in range(h):
-                spread = int(row * 0.8)
-                start = 16 - spread + dc
-                end = 16 + spread + dc
+                spread = int(row * 0.9)
                 r = 4 + row + dr
+                cl = 16 - spread + dc
+                cr = 16 + spread + dc
                 if 0 <= r < 32:
-                    c1, c2 = max(0, start), min(32, end)
-                    imgs[i, r, c1:c2, :] = intensity
+                    # Left edge pixel
+                    if 0 <= cl < 32 and np.random.rand() > drop_rate:
+                        imgs[i, r, cl, :] = intensity
+                    # Right edge pixel
+                    if 0 <= cr < 32 and np.random.rand() > drop_rate:
+                        imgs[i, r, cr, :] = intensity
+                # Bottom edge
+                if row == h - 1 and 0 <= r < 32:
+                    for cc in range(max(0, cl), min(32, cr+1)):
+                        if np.random.rand() > drop_rate:
+                            imgs[i, r, cc, :] = intensity
 
-        elif class_id == 8:   # Border frame (random thickness 1-3)
-            thick = np.random.randint(1, 4)
-            m = 3  # margin
-            # Top edge
-            r1, r2, c1, c2 = safe(m+dr, m+thick+dr, m+dc, 29+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
-            # Bottom edge
-            r1, r2, c1, c2 = safe(29-thick+dr, 29+dr, m+dc, 29+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
-            # Left edge
-            r1, r2, c1, c2 = safe(m+dr, 29+dr, m+dc, m+thick+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
-            # Right edge
-            r1, r2, c1, c2 = safe(m+dr, 29+dr, 29-thick+dc, 29+dc)
-            imgs[i, r1:r2, c1:c2, :] = intensity
+        elif class_id == 8:   # Border frame (thin, 1px)
+            m = 3 + np.random.randint(0, 3)
+            draw_with_dropout(imgs[i], m+dr, m+1+dr, m+dc, 31-m+dc, intensity)
+            draw_with_dropout(imgs[i], 31-m+dr, 31-m+1+dr, m+dc, 31-m+dc, intensity)
+            draw_with_dropout(imgs[i], m+dr, 31-m+dr, m+dc, m+1+dc, intensity)
+            draw_with_dropout(imgs[i], m+dr, 31-m+dr, 31-m+dc, 31-m+1+dc, intensity)
 
-        elif class_id == 9:   # Checkerboard (random cell size 4-6)
-            cell = np.random.randint(4, 7)
+        elif class_id == 9:   # Checkerboard (small cells 3-5)
+            cell = np.random.randint(3, 6)
             for r in range(0, 32, cell):
                 for c in range(0, 32, cell):
                     if ((r // cell) + (c // cell)) % 2 == 0:
-                        cr = r + dr
-                        cc = c + dc
-                        half = cell // 2
-                        r1, r2, c1, c2 = safe(cr, cr+half, cc, cc+half)
-                        imgs[i, r1:r2, c1:c2, :] = intensity
+                        cr_pos = r + dr
+                        cc_pos = c + dc
+                        half = max(1, cell // 2)
+                        draw_with_dropout(imgs[i], cr_pos, cr_pos+half,
+                                          cc_pos, cc_pos+half, intensity)
 
-        # Heavy Gaussian noise to obscure patterns (3x the original)
-        imgs[i] += np.random.randn(img_size, img_size, 3).astype('float32') * 0.15
+        # Very heavy Gaussian noise (sigma=0.25) buries the signal
+        imgs[i] += np.random.randn(img_size, img_size, 3).astype('float32') * 0.25
     return np.clip(imgs, 0, 1)  # Clamp to valid pixel range
 
 print("Generating dataset...")
