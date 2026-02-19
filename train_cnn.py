@@ -60,6 +60,8 @@ def generate_class_images(n, class_id, img_size=32):
         def draw_with_dropout(img, r1, r2, c1, c2, val):
             """Draw a filled rectangle but randomly drop pixels."""
             r1, r2, c1, c2 = safe(r1, r2, c1, c2)
+            if r2 <= r1 or c2 <= c1:
+                return
             mask = np.random.rand(r2-r1, c2-c1) > drop_rate
             for ch in range(3):
                 region = img[r1:r2, c1:c2, ch]
