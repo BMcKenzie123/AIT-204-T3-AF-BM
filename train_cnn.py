@@ -1,0 +1,293 @@
+"""
+Train CNN locally and save all results for the Streamlit app.
+
+Run once:  python train_cnn.py
+Produces:  cnn_results.npz (training curves, predictions, feature maps, filters, samples)
+
+The Streamlit app loads this file instead of training live.
+"""
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+# Use GPU if available, otherwise fall back to CPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+# -- Config --
+n_epochs = 10
+batch_size = 64
+n_train = 5000
+n_test = max(n_train // 5, 200)  # 20% of training size, at least 200
+img_size = 32                     # 32x32 RGB images
+n_classes = 10
+
+# 10 geometric pattern classes - each draws a unique shape on noisy background
+class_names = ['H-Lines','V-Lines','Diagonal','Circle','Block',
+               'Corners','Cross','Triangle','Border','Checker']
+
+# -- Generate synthetic data --
+np.random.seed(42)  # Fixed seed for reproducible dataset
+
+def generate_class_images(n, class_id, img_size=32):
+    """Generate n synthetic images for a given class.
+
+    Each class draws a distinct geometric pattern onto a dim random
+    RGB background. Gaussian noise added at the end to prevent the
+    CNN from memorizing exact pixel values.
+    """
+    # Dim random base - 0.0 to 0.3 intensity per channel
+    imgs = np.random.rand(n, img_size, img_size, 3).astype('float32') * 0.3
+    for i in range(n):
+        # Each class draws a unique pattern in a specific color channel
+        if class_id == 0:     # Horizontal lines in red
+            imgs[i, 10:12, 5:27, 0] = 0.9
+            imgs[i, 20:22, 5:27, 0] = 0.9
+        elif class_id == 1:   # Vertical lines in green
+            imgs[i, 5:27, 10:12, 1] = 0.9
+            imgs[i, 5:27, 20:22, 1] = 0.9
+        elif class_id == 2:   # Diagonal line in blue
+            for k in range(20):
+                imgs[i, 6+k, 6+k, 2] = 0.9
+        elif class_id == 3:   # Circle in all channels
+            for angle in np.linspace(0, 2*np.pi, 30):
+                r, c = int(16 + 8*np.sin(angle)), int(16 + 8*np.cos(angle))
+                if 0 <= r < 32 and 0 <= c < 32:
+                    imgs[i, r, c, :] = 0.9
+        elif class_id == 4:   # Solid block in red+green
+            imgs[i, 10:22, 10:22, 0] = 0.8
+            imgs[i, 10:22, 10:22, 1] = 0.8
+        elif class_id == 5:   # Corner dots in green
+            imgs[i, 2:8, 2:8, 1] = 0.9
+            imgs[i, 24:30, 24:30, 1] = 0.9
+        elif class_id == 6:   # Cross in blue
+            imgs[i, 14:18, 5:27, 2] = 0.9
+            imgs[i, 5:27, 14:18, 2] = 0.9
+        elif class_id == 7:   # Triangle in red
+            for row in range(15):
+                start = 16 - row
+                end = 16 + row
+                imgs[i, 5+row, max(0, start):min(32, end), 0] = 0.8
+        elif class_id == 8:   # Border frame in all channels
+            imgs[i, 3:5, 3:29, :] = 0.9
+            imgs[i, 27:29, 3:29, :] = 0.9
+            imgs[i, 3:29, 3:5, :] = 0.9
+            imgs[i, 3:29, 27:29, :] = 0.9
+        elif class_id == 9:   # Checkerboard in all channels
+            for r in range(0, 32, 8):
+                for c in range(0, 32, 8):
+                    if (r // 8 + c // 8) % 2 == 0:
+                        imgs[i, r:r+4, c:c+4, :] = 0.8
+        # Small Gaussian noise to simulate sensor noise
+        imgs[i] += np.random.randn(img_size, img_size, 3).astype('float32') * 0.05
+    return np.clip(imgs, 0, 1)  # Clamp to valid pixel range
+
+print("Generating dataset...")
+# Generate equal samples per class for balanced training
+x_train_list, y_train_list = [], []
+x_test_list, y_test_list = [], []
+for c in range(n_classes):
+    x_train_list.append(generate_class_images(n_train // n_classes, c))
+    y_train_list.append(np.full(n_train // n_classes, c))
+    x_test_list.append(generate_class_images(n_test // n_classes, c))
+    y_test_list.append(np.full(n_test // n_classes, c))
+
+# Concatenate per-class arrays into single train/test sets
+x_train = np.concatenate(x_train_list)
+y_train = np.concatenate(y_train_list)
+x_test = np.concatenate(x_test_list)
+y_test = np.concatenate(y_test_list)
+
+# Shuffle so the model does not see all of one class in sequence
+idx = np.random.permutation(len(x_train))
+x_train, y_train = x_train[idx], y_train[idx]
+idx = np.random.permutation(len(x_test))
+x_test, y_test = x_test[idx], y_test[idx]
+
+# Grab one example per class for the sample grid in the app
+sample_images = np.zeros((10, img_size, img_size, 3), dtype='float32')
+sample_labels = np.zeros(10, dtype='int64')
+shown = set()
+for i in range(len(x_train)):
+    c = y_train[i]
+    if c not in shown:
+        sample_images[len(shown)] = x_train[i]
+        sample_labels[len(shown)] = c
+        shown.add(c)
+        if len(shown) >= 10:
+            break
+
+# -- Build model --
+class CNN(nn.Module):
+    """Two-block CNN matching the architecture described in sections 1-9."""
+    def __init__(self):
+        super(CNN, self).__init__()
+        # Block 1: 32 filters for low-level features - edges, textures
+        self.conv1a = nn.Conv2d(3, 32, 3, padding=1)
+        self.bn1a = nn.BatchNorm2d(32)
+        self.conv1b = nn.Conv2d(32, 32, 3, padding=1)
+        self.pool1 = nn.MaxPool2d(2, 2)       # 32x32 -> 16x16
+        self.drop1 = nn.Dropout(0.25)
+
+        # Block 2: 64 filters for higher-level features - shapes, patterns
+        self.conv2a = nn.Conv2d(32, 64, 3, padding=1)
+        self.bn2a = nn.BatchNorm2d(64)
+        self.conv2b = nn.Conv2d(64, 64, 3, padding=1)
+        self.pool2 = nn.MaxPool2d(2, 2)        # 16x16 -> 8x8
+        self.drop2 = nn.Dropout(0.25)
+
+        # Classification head
+        self.fc1 = nn.Linear(64 * 8 * 8, 128)  # Flatten 8x8x64 = 4096 -> 128
+        self.bn_fc = nn.BatchNorm1d(128)
+        self.drop3 = nn.Dropout(0.5)            # Aggressive dropout before output
+        self.fc2 = nn.Linear(128, 10)           # 10-class scores
+
+    def forward(self, x):
+        # Block 1
+        x = torch.relu(self.conv1a(x))
+        x = self.bn1a(x)
+        x = torch.relu(self.conv1b(x))
+        x = self.drop1(self.pool1(x))
+        # Block 2
+        x = torch.relu(self.conv2a(x))
+        x = self.bn2a(x)
+        x = torch.relu(self.conv2b(x))
+        x = self.drop2(self.pool2(x))
+        # Classification head
+        x = x.reshape(x.size(0), -1)  # Flatten - reshape handles non-contiguous
+        x = torch.relu(self.fc1(x))
+        x = self.bn_fc(x)
+        x = self.drop3(x)
+        x = self.fc2(x)               # Raw logits - softmax applied at inference
+        return x
+
+model = CNN().to(device)
+criterion = nn.CrossEntropyLoss()  # Combines log-softmax and NLL loss
+optimizer = optim.Adam(model.parameters())
+
+# -- Prepare DataLoaders --
+# Convert numpy HWC arrays to PyTorch NCHW format - channels first
+x_train_t = torch.tensor(x_train).permute(0, 3, 1, 2)
+y_train_t = torch.tensor(y_train, dtype=torch.long)
+x_test_t = torch.tensor(x_test).permute(0, 3, 1, 2)
+y_test_t = torch.tensor(y_test, dtype=torch.long)
+
+# Hold out 20% of training data for validation
+val_size = int(0.2 * len(x_train_t))
+x_val_t, y_val_t = x_train_t[:val_size], y_train_t[:val_size]
+x_train_t, y_train_t = x_train_t[val_size:], y_train_t[val_size:]
+
+train_loader = DataLoader(TensorDataset(x_train_t, y_train_t), batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(TensorDataset(x_val_t, y_val_t), batch_size=batch_size)
+test_loader = DataLoader(TensorDataset(x_test_t, y_test_t), batch_size=batch_size)
+
+# -- Train --
+epoch_acc, epoch_val_acc, epoch_loss, epoch_val_loss = [], [], [], []
+
+for epoch in range(n_epochs):
+    # Training pass - gradient updates enabled
+    model.train()
+    running_loss, correct, total = 0.0, 0, 0
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()          # Clear gradients from previous step
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()                # Compute gradients via backpropagation
+        optimizer.step()               # Update weights
+        running_loss += loss.item() * images.size(0)
+        correct += (outputs.argmax(1) == labels).sum().item()
+        total += labels.size(0)
+
+    train_loss = running_loss / total
+    train_acc = correct / total
+
+    # Validation pass - no gradients needed
+    model.eval()
+    vl, vc, vt = 0.0, 0, 0
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            vl += criterion(outputs, labels).item() * images.size(0)
+            vc += (outputs.argmax(1) == labels).sum().item()
+            vt += labels.size(0)
+
+    val_loss, val_acc = vl / vt, vc / vt
+    epoch_acc.append(train_acc)
+    epoch_val_acc.append(val_acc)
+    epoch_loss.append(train_loss)
+    epoch_val_loss.append(val_loss)
+    print(f"Epoch {epoch+1}/{n_epochs} - acc: {train_acc:.3f} val_acc: {val_acc:.3f} loss: {train_loss:.4f}")
+
+# -- Evaluate on held-out test set --
+model.eval()
+tc, tt, tl = 0, 0, 0.0
+with torch.no_grad():
+    for images, labels in test_loader:
+        images, labels = images.to(device), labels.to(device)
+        outputs = model(images)
+        tl += criterion(outputs, labels).item() * images.size(0)
+        tc += (outputs.argmax(1) == labels).sum().item()
+        tt += labels.size(0)
+
+test_acc = tc / tt
+test_loss = tl / tt
+print(f"\nTest Accuracy: {test_acc:.2%} | Test Loss: {test_loss:.4f}")
+
+# -- Predictions on 10 test images --
+# Apply softmax to convert raw logits into probability distributions
+with torch.no_grad():
+    pred_inputs = torch.tensor(x_test[:10]).permute(0, 3, 1, 2).to(device)
+    pred_outputs = torch.softmax(model(pred_inputs), dim=1).cpu().numpy()
+pred_images = x_test[:10]
+pred_labels = y_test[:10]
+
+# -- Feature maps from first conv layer --
+# Register a forward hook to capture intermediate activations
+hook_output = [None]  # Use list since closures cannot rebind outer variables
+def hook_fn(module, input, output):
+    hook_output[0] = output.detach().cpu().numpy()
+hook = model.conv1a.register_forward_hook(hook_fn)
+with torch.no_grad():
+    model(torch.tensor(x_test[0:1]).permute(0, 3, 1, 2).to(device))
+hook.remove()
+feature_maps = hook_output[0]  # Shape: (1, 32, 32, 32) - 32 filter activations
+
+# -- Learned filters --
+# PyTorch stores weights as (out_ch, in_ch, H, W) - transpose to HWC for display
+raw_filters = model.conv1a.weight.detach().cpu().numpy()
+filters_display = np.zeros((32, 3, 3, 3), dtype='float32')
+for i in range(32):
+    f = raw_filters[i].transpose(1, 2, 0)       # CHW -> HWC for RGB display
+    f = (f - f.min()) / (f.max() - f.min())      # Min-max normalize to [0, 1]
+    filters_display[i] = f
+
+# -- Save all results to a single compressed file --
+# The Streamlit app loads this instead of running training at deploy time
+np.savez_compressed('cnn_results.npz',
+    # Training history - one value per epoch
+    epoch_acc=np.array(epoch_acc),
+    epoch_val_acc=np.array(epoch_val_acc),
+    epoch_loss=np.array(epoch_loss),
+    epoch_val_loss=np.array(epoch_val_loss),
+    # Final test set metrics
+    test_acc=np.array(test_acc),
+    test_loss=np.array(test_loss),
+    # One sample image per class for the dataset grid
+    sample_images=sample_images,
+    sample_labels=sample_labels,
+    # 10 test predictions with softmax probabilities
+    pred_images=pred_images,
+    pred_labels=pred_labels,
+    pred_outputs=pred_outputs,
+    # First conv layer outputs and weights for visualization
+    feature_maps=feature_maps,
+    filters_display=filters_display,
+    # Class name strings for plot labels
+    class_names=np.array(class_names),
+)
+
+print(f"\nSaved cnn_results.npz")

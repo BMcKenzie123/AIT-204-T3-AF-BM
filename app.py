@@ -6,13 +6,13 @@ Interactive demonstration of key CNN concepts including:
   stride/padding calculations)
 - Part 2: CNN architecture, feature maps, pooling, and classification
   (RGB vs grayscale structure, activation functions, softmax output,
-  and live training on synthetic data using TensorFlow/Keras)
+  and importing pre-trained PyTorch data)
 
-Dependencies: streamlit, numpy, matplotlib, torch (PyTorch)
+Dependencies: streamlit, numpy, matplotlib
+Training script (train_cnn.py) requires: torch (PyTorch)
 Run with: streamlit run app.py
 
 Author: Brogan McKenzie and Adonijah Farner
-Course: AIT-204 Deep Learning
 """
 
 import streamlit as st
@@ -54,7 +54,7 @@ section = st.sidebar.radio(
 # ----------------------------------------------
 def show(fig):
     """Render a matplotlib figure in the Streamlit UI and free memory."""
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close(fig)  # Prevent memory leaks from accumulating open figures
 
 
@@ -642,316 +642,73 @@ elif section == "9. Softmax Output":
 
 
 # ============================================================
-# 10 - TRAIN A CNN (LIVE)
 # ============================================================
-elif section == "10. Train a CNN (Live)":
-    st.header("Live CNN Training on Synthetic Data")
+# 10 - CNN TRAINING RESULTS
+# ============================================================
+elif section == "10. Pre-Trained CNN":
+    st.header("CNN Training Results on Synthetic Data")
 
     st.markdown("""
-    This section generates a synthetic 10-class image dataset with distinct geometric patterns,
-    builds a CNN, and trains it live. Training takes ~30–60 seconds.
+    A CNN was trained on a synthetic 10-class geometric pattern dataset (5000 training images,
+    32x32 RGB). The model uses two Conv-BN-Conv-Pool-Dropout blocks followed by a dense
+    classification head. Results below were generated with PyTorch.
     """)
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        n_epochs = st.slider("Epochs", 1, 20, 10)
-    with col2:
-        batch_size = st.selectbox("Batch size", [32, 64, 128], index=1)
-    with col3:
-        n_train = st.selectbox("Training samples", [1000, 2500, 5000], index=2)
-
-    if st.button("Train CNN", type="primary"):
-        # PyTorch imported here instead of top level to avoid slow startup
-        import torch
-        import torch.nn as nn
-        import torch.optim as optim
-        from torch.utils.data import TensorDataset, DataLoader
-
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        # 10 distinct geometric pattern classes for the synthetic dataset
-        # Each class draws a unique shape on a noisy RGB background
-        class_names = ['H-Lines','V-Lines','Diagonal','Circle','Block',
-                       'Corners','Cross','Triangle','Border','Checker']
-
-        # -- Generate synthetic data --
-        progress = st.progress(0, text="Generating synthetic dataset…")
-        np.random.seed(42)  # Reproducibility for consistent demo results
-        n_test = max(n_train // 5, 200)  # 20% of training size, at least 200
-        img_size = 32   # 32x32 pixels - small enough for fast training
-        n_classes = 10
-
-        def generate_class_images(n, class_id, img_size=32):
-            """Generate n synthetic images for a given class.
-
-            Each class draws a distinct geometric pattern onto a low-intensity
-            random RGB background. Gaussian noise is added at the end to
-            simulate real-world image imperfections.
-            """
-            # Start with dim random noise as a base - 0.0 to 0.3 intensity per channel
-            imgs = np.random.rand(n, img_size, img_size, 3).astype('float32') * 0.3
-            for i in range(n):
-                # Each class_id draws a unique pattern in a specific color channel
-                # 0=horizontal lines (red), 1=vertical lines (green),
-                # 2=diagonal (blue), 3=circle (all), 4=solid block (R+G),
-                # 5=corner dots (green), 6=cross (blue), 7=triangle (red),
-                # 8=border frame (all), 9=checkerboard (all)
-                if class_id == 0:
-                    imgs[i, 10:12, 5:27, 0] = 0.9
-                    imgs[i, 20:22, 5:27, 0] = 0.9
-                elif class_id == 1:
-                    imgs[i, 5:27, 10:12, 1] = 0.9
-                    imgs[i, 5:27, 20:22, 1] = 0.9
-                elif class_id == 2:
-                    for k in range(20):
-                        imgs[i, 6+k, 6+k, 2] = 0.9
-                elif class_id == 3:
-                    for angle in np.linspace(0, 2*np.pi, 30):
-                        r, c = int(16 + 8*np.sin(angle)), int(16 + 8*np.cos(angle))
-                        if 0 <= r < 32 and 0 <= c < 32:
-                            imgs[i, r, c, :] = 0.9
-                elif class_id == 4:
-                    imgs[i, 10:22, 10:22, 0] = 0.8
-                    imgs[i, 10:22, 10:22, 1] = 0.8
-                elif class_id == 5:
-                    imgs[i, 2:8, 2:8, 1] = 0.9
-                    imgs[i, 24:30, 24:30, 1] = 0.9
-                elif class_id == 6:
-                    imgs[i, 14:18, 5:27, 2] = 0.9
-                    imgs[i, 5:27, 14:18, 2] = 0.9
-                elif class_id == 7:
-                    for row in range(15):
-                        start = 16 - row
-                        end = 16 + row
-                        imgs[i, 5+row, max(0, start):min(32, end), 0] = 0.8
-                elif class_id == 8:
-                    imgs[i, 3:5, 3:29, :] = 0.9
-                    imgs[i, 27:29, 3:29, :] = 0.9
-                    imgs[i, 3:29, 3:5, :] = 0.9
-                    imgs[i, 3:29, 27:29, :] = 0.9
-                elif class_id == 9:
-                    for r in range(0, 32, 8):
-                        for c in range(0, 32, 8):
-                            if (r // 8 + c // 8) % 2 == 0:
-                                imgs[i, r:r+4, c:c+4, :] = 0.8
-                # Add small Gaussian noise to simulate sensor noise and prevent overfitting
-                imgs[i] += np.random.randn(img_size, img_size, 3).astype('float32') * 0.05
-            return np.clip(imgs, 0, 1)  # Clamp to valid pixel range [0, 1]
-
-        # Generate balanced dataset - equal samples per class, then shuffle
-        x_train_list, y_train_list = [], []
-        x_test_list, y_test_list = [], []
-        for c in range(n_classes):
-            x_train_list.append(generate_class_images(n_train // n_classes, c))
-            y_train_list.append(np.full((n_train // n_classes, 1), c))
-            x_test_list.append(generate_class_images(n_test // n_classes, c))
-            y_test_list.append(np.full((n_test // n_classes, 1), c))
-
-        # Concatenate per-class arrays into single train/test sets
-        x_train = np.concatenate(x_train_list)
-        y_train = np.concatenate(y_train_list).flatten()
-        x_test = np.concatenate(x_test_list)
-        y_test = np.concatenate(y_test_list).flatten()
-        # Shuffle training data so the model does not see all of one class in sequence
-        # Sequential class ordering can cause unstable gradient updates
-        idx = np.random.permutation(len(x_train))
-        x_train, y_train = x_train[idx], y_train[idx]
-        idx = np.random.permutation(len(x_test))
-        x_test, y_test = x_test[idx], y_test[idx]
-
-        progress.progress(10, text="Dataset ready - showing samples...")
-
-        # -- Sample images --
-        fig, axes = plt.subplots(2, 5, figsize=(12, 5))
-        fig.suptitle("Synthetic Dataset Samples", fontsize=14, fontweight='bold')
-        shown = set()
-        di = 0
-        for i in range(len(x_train)):
-            c = y_train[i]
-            if c not in shown:
-                ax = axes[di // 5, di % 5]
-                ax.imshow(x_train[i])
-                ax.set_title(f"Class {c}: {class_names[c]}", fontsize=9)
-                ax.axis('off')
-                shown.add(c)
-                di += 1
-                if di >= 10:
-                    break
-        plt.tight_layout()
-        show(fig)
-
-        # -- Build model --
-        # Architecture: Conv -> BN -> Conv -> Pool -> Dropout (x2), then Flatten -> Dense -> Output
-        # Batch normalization stabilizes training; dropout prevents overfitting
-        progress.progress(15, text="Building CNN...")
-
-        class CNN(nn.Module):
-            def __init__(self):
-                super(CNN, self).__init__()
-                # Block 1: 32 filters learn low-level features - edges, textures
-                self.conv1a = nn.Conv2d(3, 32, 3, padding=1)
-                self.bn1a = nn.BatchNorm2d(32)
-                self.conv1b = nn.Conv2d(32, 32, 3, padding=1)
-                self.pool1 = nn.MaxPool2d(2, 2)       # 32x32 -> 16x16
-                self.drop1 = nn.Dropout(0.25)          # Randomly zero 25% of activations
-
-                # Block 2: 64 filters learn higher-level features - shapes, patterns
-                self.conv2a = nn.Conv2d(32, 64, 3, padding=1)
-                self.bn2a = nn.BatchNorm2d(64)
-                self.conv2b = nn.Conv2d(64, 64, 3, padding=1)
-                self.pool2 = nn.MaxPool2d(2, 2)        # 16x16 -> 8x8
-                self.drop2 = nn.Dropout(0.25)
-
-                # Classification head: flatten 8x8x64 = 4096 features into a 1D vector
-                self.fc1 = nn.Linear(64 * 8 * 8, 128)
-                self.bn_fc = nn.BatchNorm1d(128)
-                self.drop3 = nn.Dropout(0.5)           # Aggressive dropout before final layer
-                self.fc2 = nn.Linear(128, 10)          # 10-class output
-
-            def forward(self, x):
-                x = torch.relu(self.conv1a(x))
-                x = self.bn1a(x)
-                x = torch.relu(self.conv1b(x))
-                x = self.drop1(self.pool1(x))
-
-                x = torch.relu(self.conv2a(x))
-                x = self.bn2a(x)
-                x = torch.relu(self.conv2b(x))
-                x = self.drop2(self.pool2(x))
-
-                x = x.view(x.size(0), -1)
-                x = torch.relu(self.fc1(x))
-                x = self.bn_fc(x)
-                x = self.drop3(x)
-                x = self.fc2(x)
-                return x
-
-        model = CNN().to(device)
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters())
-
-        with st.expander("Model summary"):
-            st.code(str(model))
-
-        # -- Prepare PyTorch DataLoaders --
-        # Convert numpy HWC arrays to PyTorch NCHW tensors (channels-first)
-        x_train_t = torch.tensor(x_train).permute(0, 3, 1, 2)
-        y_train_t = torch.tensor(y_train, dtype=torch.long)
-        x_test_t = torch.tensor(x_test).permute(0, 3, 1, 2)
-        y_test_t = torch.tensor(y_test, dtype=torch.long)
-
-        # Split off 20% of training data for validation
-        val_size = int(0.2 * len(x_train_t))
-        x_val_t = x_train_t[:val_size]
-        y_val_t = y_train_t[:val_size]
-        x_train_t = x_train_t[val_size:]
-        y_train_t = y_train_t[val_size:]
-
-        train_loader = DataLoader(TensorDataset(x_train_t, y_train_t),
-                                  batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(TensorDataset(x_val_t, y_val_t),
-                                batch_size=batch_size)
-        test_loader = DataLoader(TensorDataset(x_test_t, y_test_t),
-                                 batch_size=batch_size)
-
-        # -- Train with live progress --
-        progress.progress(20, text="Training...")
-        epoch_data = {"acc": [], "val_acc": [], "loss": [], "val_loss": []}
-
-        for epoch in range(n_epochs):
-            # Training pass
-            model.train()
-            running_loss = 0.0
-            correct = 0
-            total = 0
-            for images, labels in train_loader:
-                images, labels = images.to(device), labels.to(device)
-                optimizer.zero_grad()
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-                running_loss += loss.item() * images.size(0)
-                correct += (outputs.argmax(1) == labels).sum().item()
-                total += labels.size(0)
-
-            train_loss = running_loss / total
-            train_acc = correct / total
-
-            # Validation pass
-            model.eval()
-            val_loss_sum = 0.0
-            val_correct = 0
-            val_total = 0
-            with torch.no_grad():
-                for images, labels in val_loader:
-                    images, labels = images.to(device), labels.to(device)
-                    outputs = model(images)
-                    val_loss_sum += criterion(outputs, labels).item() * images.size(0)
-                    val_correct += (outputs.argmax(1) == labels).sum().item()
-                    val_total += labels.size(0)
-
-            val_loss = val_loss_sum / val_total
-            val_acc = val_correct / val_total
-
-            epoch_data["acc"].append(train_acc)
-            epoch_data["val_acc"].append(val_acc)
-            epoch_data["loss"].append(train_loss)
-            epoch_data["val_loss"].append(val_loss)
-
-            # Update progress bar after each epoch
-            pct = 20 + int(70 * (epoch + 1) / n_epochs)
-            progress.progress(pct, text=f"Epoch {epoch+1}/{n_epochs} - acc: {train_acc:.3f} val_acc: {val_acc:.3f}")
-
-        # -- Evaluate on held-out test set - never seen during training --
-        model.eval()
-        test_correct = 0
-        test_total = 0
-        test_loss_sum = 0.0
-        with torch.no_grad():
-            for images, labels in test_loader:
-                images, labels = images.to(device), labels.to(device)
-                outputs = model(images)
-                test_loss_sum += criterion(outputs, labels).item() * images.size(0)
-                test_correct += (outputs.argmax(1) == labels).sum().item()
-                test_total += labels.size(0)
-
-        test_acc = test_correct / test_total
-        test_loss = test_loss_sum / test_total
-        progress.progress(95, text="Generating visualizations...")
+    # Load pre-computed results from local training run
+    import os
+    results_path = os.path.join(os.path.dirname(__file__), 'cnn_results.npz')
+    if not os.path.exists(results_path):
+        st.error("cnn_results.npz not found. Run `python train_cnn.py` first to generate training results.")
+    else:
+        data = np.load(results_path, allow_pickle=True)
+        class_names = list(data['class_names'])
+        test_acc = float(data['test_acc'])
+        test_loss = float(data['test_loss'])
 
         st.success(f"**Test Accuracy: {test_acc:.2%}** | Test Loss: {test_loss:.4f}")
 
+        # -- Sample images --
+        st.subheader("Dataset Samples")
+        sample_images = data['sample_images']
+        sample_labels = data['sample_labels']
+        fig, axes = plt.subplots(2, 5, figsize=(12, 5))
+        fig.suptitle("Synthetic Dataset Samples", fontsize=14, fontweight='bold')
+        for i in range(10):
+            ax = axes[i // 5, i % 5]
+            ax.imshow(sample_images[i])
+            ax.set_title(f"Class {sample_labels[i]}: {class_names[sample_labels[i]]}", fontsize=9)
+            ax.axis('off')
+        plt.tight_layout()
+        show(fig)
+
         # -- Training curves --
+        st.subheader("Training History")
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         fig.suptitle("Training History", fontsize=14, fontweight='bold')
-        ax1.plot(epoch_data["acc"], label='Train', linewidth=2)
-        ax1.plot(epoch_data["val_acc"], label='Val', linewidth=2)
+        ax1.plot(data['epoch_acc'], label='Train', linewidth=2)
+        ax1.plot(data['epoch_val_acc'], label='Val', linewidth=2)
         ax1.set_title("Accuracy"); ax1.set_xlabel("Epoch"); ax1.set_ylabel("Accuracy")
         ax1.legend(); ax1.grid(True, alpha=0.3)
-        ax2.plot(epoch_data["loss"], label='Train', linewidth=2)
-        ax2.plot(epoch_data["val_loss"], label='Val', linewidth=2)
+        ax2.plot(data['epoch_loss'], label='Train', linewidth=2)
+        ax2.plot(data['epoch_val_loss'], label='Val', linewidth=2)
         ax2.set_title("Loss"); ax2.set_xlabel("Epoch"); ax2.set_ylabel("Loss")
         ax2.legend(); ax2.grid(True, alpha=0.3)
         plt.tight_layout()
         show(fig)
 
         # -- Predictions --
-        # Run inference on 10 test images and display predicted vs true labels
-        # Green title = correct, red = misclassification
-        model.eval()
-        with torch.no_grad():
-            sample_inputs = torch.tensor(x_test[:10]).permute(0, 3, 1, 2).to(device)
-            sample_outputs = torch.softmax(model(sample_inputs), dim=1).cpu().numpy()
-
+        st.subheader("Predictions")
+        pred_images = data['pred_images']
+        pred_labels = data['pred_labels']
+        pred_outputs = data['pred_outputs']
         fig, axes = plt.subplots(2, 5, figsize=(14, 6))
         fig.suptitle(f"Predictions (Test Accuracy: {test_acc:.2%})", fontsize=14, fontweight='bold')
         for i in range(10):
             ax = axes[i // 5, i % 5]
-            ax.imshow(x_test[i])
-            pred_class = np.argmax(sample_outputs[i])    # Class with highest softmax probability
-            true_class = y_test[i]                        # Ground truth label
-            confidence = sample_outputs[i][pred_class] * 100
+            ax.imshow(pred_images[i])
+            pred_class = np.argmax(pred_outputs[i])
+            true_class = pred_labels[i]
+            confidence = pred_outputs[i][pred_class] * 100
             color = 'green' if pred_class == true_class else 'red'
             ax.set_title(f"Pred: {class_names[pred_class]}\n({confidence:.1f}%)\nTrue: {class_names[true_class]}",
                          fontsize=8, color=color, fontweight='bold')
@@ -960,46 +717,27 @@ elif section == "10. Train a CNN (Live)":
         show(fig)
 
         # -- Feature maps --
-        # Hook into the first conv layer to capture its output activations
-        # Visualize what the 32 learned filters "see" in a sample image
-        model.eval()
-        hook_output = [None]
-        def hook_fn(module, input, output):
-            hook_output[0] = output.detach().cpu().numpy()
-        hook = model.conv1a.register_forward_hook(hook_fn)
-
-        with torch.no_grad():
-            sample_t = torch.tensor(x_test[0:1]).permute(0, 3, 1, 2).to(device)
-            model(sample_t)
-        hook.remove()
-        first_conv_output = hook_output[0]
-
+        st.subheader("Feature Maps - First Conv Layer")
+        feature_maps = data['feature_maps']
         fig, axes = plt.subplots(4, 8, figsize=(16, 8))
         fig.suptitle("Feature Maps - First Conv Layer (32 filters)", fontsize=14, fontweight='bold')
         for i in range(32):
             ax = axes[i // 8, i % 8]
-            # PyTorch feature maps are NCHW so index channel dimension
-            ax.imshow(first_conv_output[0, i, :, :], cmap='viridis')
+            ax.imshow(feature_maps[0, i, :, :], cmap='viridis')
             ax.set_title(f"F{i+1}", fontsize=7)
             ax.axis('off')
         plt.tight_layout()
         show(fig)
 
         # -- Learned filters --
-        # Extract raw 3x3 weight tensors from the first conv layer
-        # PyTorch stores as (out_channels, in_channels, H, W) - transpose for display
-        filters = model.conv1a.weight.detach().cpu().numpy()
+        st.subheader("Learned Filters")
+        filters_display = data['filters_display']
         fig, axes = plt.subplots(4, 8, figsize=(16, 8))
         fig.suptitle("Learned Filters (First Conv Layer)", fontsize=14, fontweight='bold')
         for i in range(32):
             ax = axes[i // 8, i % 8]
-            # Transpose from CHW to HWC so imshow interprets the 3 channels as RGB
-            f = filters[i].transpose(1, 2, 0)
-            f = (f - f.min()) / (f.max() - f.min())  # Min-max normalize for display
-            ax.imshow(f)
+            ax.imshow(filters_display[i])
             ax.set_title(f"F{i+1}", fontsize=7)
             ax.axis('off')
         plt.tight_layout()
         show(fig)
-
-        progress.progress(100, text="Done!")
