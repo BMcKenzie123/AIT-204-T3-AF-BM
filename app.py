@@ -45,7 +45,7 @@ section = st.sidebar.radio(
         "7. Pooling Layers",
         "8. CNN Steps Flowchart",
         "9. Softmax Output",
-        "10. Train a CNN (Live)",
+        "10. Pre-Trained CNN",
     ],
 )
 
